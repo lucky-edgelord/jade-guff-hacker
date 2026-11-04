@@ -25,7 +25,7 @@ import numpy as np
 from .evaluator import EvalResult, check_thresholds, evaluate, load_suite
 from .inspector import GGUFReader, open_gguf
 from .log import get_logger, progress
-from .patcher import PatchAborted, Patcher
+from .patcher import PatchError, Patcher
 from .tracer import NumpyLlama, Steering
 
 log = get_logger("harness")
@@ -89,7 +89,7 @@ class Harness:
         """Apply an edit (and/or steering), evaluate vs baseline, then revert."""
         if self.base is None:
             self.baseline()
-        names = self._resolve(tensors)
+        names = self._resolve(tensors, field)
         t0, err, metrics, verdict = time.time(), None, {}, {}
         n_before = len(self.patcher.journal)
         try:
@@ -100,7 +100,7 @@ class Harness:
             res = evaluate(m, self.suite, self.base.logprobs)
             metrics = res.to_dict(); metrics.pop("per_prompt", None)
             verdict = check_thresholds(res, self.base.to_dict(), **self.thresholds)
-        except PatchAborted as e:
+        except PatchError as e:
             err = f"aborted: {e}"; verdict = {"pass": False, "reasons": [err]}
         finally:
             self.patcher.revert(len(self.patcher.journal) - n_before)
@@ -114,14 +114,18 @@ class Harness:
         self.trials.append(tr)
         return tr
 
-    def _resolve(self, tensors) -> list[str]:
+    def _resolve(self, tensors, field: str = "d") -> list[str]:
+        """Expand names/globs. Glob matches silently skip tensors that have no ``field`` scale
+        (e.g. F32 norm weights), so ``blk.*.ffn_*`` does what you mean."""
         pats = [tensors] if isinstance(tensors, str) else list(tensors)
         names = []
         for p in pats:
-            hit = [t.name for t in self.reader.find(p)] if any(c in p for c in "*?[") else (
-                [p] if p in self.reader.tensors else [])
+            if any(c in p for c in "*?["):
+                hit = [t.name for t in self.reader.find(p) if any(f.name == field for f in t.layout.scale_fields)]
+            else:
+                hit = [p] if p in self.reader.tensors else []
             if not hit:
-                raise KeyError(f"no tensor matches {p!r}")
+                raise KeyError(f"no tensor with a {field!r} scale matches {p!r}")
             names += hit
         return names
 
@@ -134,7 +138,8 @@ class Harness:
         """
         if param not in ("multiplier", "set_to"):
             raise ValueError("param must be 'multiplier' or 'set_to'")
-        groups = [[n] for n in self._resolve(pattern)] if per_layer else [self._resolve(pattern)]
+        res = self._resolve(pattern, field)
+        groups = [[n] for n in res] if per_layer else [res]
         out = []
         total = len(groups) * len(values)
         bar = progress(total=total, desc="sweep", unit="trial")

@@ -82,9 +82,8 @@ class Patcher:
     """
 
     def __init__(self, reader: GGUFReader, *, backup: bool = True, journal: bool = True):
-        if not reader.writable:
-            raise PatchError("reader must be opened with writable=True to patch")
         self.r = reader
+        self._ro = not reader.writable      # a read-only reader may still be used for dry runs
         self.backup = backup
         self._journal_on = journal
         self.journal: list[PatchRecord] = []
@@ -92,7 +91,12 @@ class Patcher:
         self._bak_done = False
 
     # ---- safety helpers ------------------------------------------------------
+    def _require_writable(self):
+        if self._ro:
+            raise PatchError("file was opened read-only; reopen with writable=True to apply edits")
+
     def _ensure_backup(self):
+        self._require_writable()
         if not self.backup or self._bak_done:
             return
         self._bak_path = self.r.path + ".bak"
@@ -123,6 +127,7 @@ class Patcher:
                                    f"(max {float(ratio.max()):.3g}x); refusing as likely error")
 
     def _write_bytes(self, off: int, data: bytes, tensor: str, fieldname: str, note: str):
+        self._require_writable()
         self._check_data_region(off, len(data))
         before = bytes(self.r.mmap[off:off + len(data)])
         if self._journal_on:
@@ -140,7 +145,11 @@ class Patcher:
         """
         ti = self.r.tensors[tensor]
         layout = ti.layout
-        f = layout.field(field)
+        try:
+            f = layout.field(field)
+        except KeyError:
+            raise PatchError(f"{tensor} ({ti.type.name}) has no scale field {field!r}; "
+                             f"scalable fields: {[x.name for x in layout.scale_fields] or 'none'}") from None
         if f.dtype != "<f2" or f.role not in ("scale", "min"):
             raise PatchError(f"{field!r} is not an fp16 scale field on {ti.type.name}")
         blocks = self.r.blocks(tensor)

@@ -127,7 +127,12 @@ class GGUFReader:
     def close(self) -> None:
         try: self._mm.flush()
         except Exception: pass
-        self._mm.close()
+        try:
+            self._mm.close()
+        except BufferError:
+            # numpy views handed out by blocks()/tensor_bytes() are still alive; the mapping is
+            # released when they are garbage-collected.
+            log.debug("mmap still referenced by live array views; deferring unmap")
         self._file.close()
 
     def __enter__(self): return self

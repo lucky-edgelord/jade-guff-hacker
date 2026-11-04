@@ -1,0 +1,7 @@
+# gguf-hack harness examples/sweep.yaml
+model: tiny.gguf
+workdir: runs/ffn-sensitivity
+thresholds: {max_ppl_ratio: 1.5, max_kl: 0.5}
+experiments:
+  - {tensors: "blk.*.ffn_down.weight", param: multiplier, values: [0.5, 0.9, 1.1, 2.0], per_layer: true}
+  - {tensors: "blk.*.attn_v.weight",   param: multiplier, values: [0.8, 1.25]}

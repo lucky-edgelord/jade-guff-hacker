@@ -30,7 +30,7 @@ def build_tiny_model(path: str, *, n_layers: int = 4, n_embd: int = 256, n_ff: i
     w.add_head_count(8)
     w.add_head_count_kv(8)
     w.add_layer_norm_rms_eps(1e-5)
-    w.add_file_type(T.Q4_K)
+    w.add_file_type(7)  # llama ftype MOSTLY_Q8_0 (the tensors below are Q8_0)
 
     def q(name, arr, qtype):
         """Quantize via reference where supported, else store F16."""
