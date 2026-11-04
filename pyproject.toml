@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gguf-weight-hacker"
+version = "0.1.0"
+description = "Zero-copy inspection, scale/byte patching, steering and evaluation for GGUF quantized LLMs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "lucky-edgelord" }]
+keywords = ["gguf", "ggml", "llama.cpp", "quantization", "model-surgery", "interpretability"]
+dependencies = ["numpy>=1.23"]
+
+[project.optional-dependencies]
+full = ["gguf>=0.9", "tqdm>=4.60", "matplotlib>=3.5", "pyyaml>=6.0"]
+dev = ["pytest>=7", "gguf>=0.9", "tqdm", "matplotlib", "pyyaml"]
+
+[project.scripts]
+gguf-hack = "gguf_weight_hacker.cli:main"
+
+[project.urls]
+Repository = "https://github.com/lucky-edgelord/jade-guff-hacker"
+
+[tool.setuptools]
+packages = ["gguf_weight_hacker", "gguf_weight_hacker.web"]
+
+[tool.setuptools.package-data]
+"gguf_weight_hacker.web" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
