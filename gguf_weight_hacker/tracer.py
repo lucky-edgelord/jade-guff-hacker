@@ -131,9 +131,16 @@ class NumpyLlama:
         return self._cache[name]
 
     # forward --------------------------------------------------------------------
+    @property
+    def head_name(self) -> str:
+        return "output.weight" if "output.weight" in self.r.tensors else "token_embd.weight"
+
     def forward(self, ids: Sequence[int], steer: Steering | Sequence[Steering] | None = None,
-                capture: bool = False):
-        """Return logits (T, vocab); with ``capture`` also ``{layer: residual (T, n_embd)}``."""
+                capture: bool = False, return_hidden: bool = False):
+        """Return logits (T, vocab); with ``capture`` also ``{layer: residual (T, n_embd)}``.
+
+        With ``return_hidden`` the final normed hidden state (the input of the output head) is
+        returned instead of logits, so ``logits = hidden @ W(head_name).T``."""
         steers = [steer] if isinstance(steer, Steering) else list(steer or [])
         T = len(ids)
         h = self.W("token_embd.weight")[np.asarray(ids)]
@@ -162,9 +169,8 @@ class NumpyLlama:
             if capture:
                 captured[l] = h.copy()
         h = _rmsnorm(h, self.W("output_norm.weight"), self.eps)
-        head = "output.weight" if "output.weight" in self.r.tensors else "token_embd.weight"
-        logits = h @ self.W(head).T
-        return (logits, captured) if capture else logits
+        out = h if return_hidden else h @ self.W(self.head_name).T
+        return (out, captured) if capture else out
 
     # helpers --------------------------------------------------------------------
     def encode(self, text: str) -> list[int]:

@@ -56,9 +56,9 @@ function axes(g, w, hh, m, xlab, ylab, ymin, ymax) {
     g.textAlign = "right"; g.fillText(tick(ymax - (ymax - ymin) * i / 4, ymax - ymin), m.l - 6, y + 4); } g.stroke();
   g.textAlign = "center"; if (xlab) g.fillText(xlab, (m.l + w - m.r) / 2, hh - 4);
 }
-function drawHist(c, hist, edges) {
+function drawHist(c, hist, edges, xlab = "scale value") {
   requestAnimationFrame(() => { const { g, w, h: hh } = prep(c), m = { l: 52, r: 10, t: 8, b: 26 };
-    const mx = Math.max(...hist, 1); axes(g, w, hh, m, "scale value", "", 0, mx);
+    const mx = Math.max(...hist, 1); axes(g, w, hh, m, xlab, "", 0, mx);
     const bw = (w - m.l - m.r) / hist.length; g.fillStyle = css("--jade-mid");
     hist.forEach((v, i) => { const bh = (hh - m.t - m.b) * v / mx; g.fillRect(m.l + i * bw + 1, hh - m.b - bh, Math.max(1, bw - 2), bh); });
     g.fillStyle = css("--muted"); g.textAlign = "left"; g.fillText(fnum(edges[0]), m.l, hh - 12); g.textAlign = "right"; g.fillText(fnum(edges.at(-1)), w - m.r, hh - 12); });
@@ -100,6 +100,7 @@ const TABS = [
   ["hex", "Hex editor", "M8 4l-5 8 5 8M16 4l5 8-5 8"],
   ["layers", "Layers", "M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"],
   ["lab", "Experiments", "M9 3v6L4 19a2 2 0 002 3h12a2 2 0 002-3l-5-10V3M8 3h8"],
+  ["recover", "Data recovery", "M11 4a7 7 0 100 14 7 7 0 000-14zM21 21l-5-5M8 11h6M11 8v6"],
 ];
 const VIEWS = {};
 async function refreshSummary() { S.summary = await api("/api/summary?" + q({ model: S.model })); }
@@ -233,6 +234,37 @@ VIEWS.lab = async root => {
   root.append(h("div", { class: "card" }, h("h2", {}, "Evaluate", h("small", {}, "numpy reference forward pass")), h("div", { class: "row", style: "margin-bottom:10px" }, evalBtn("Set baseline", true), evalBtn("Evaluate now", false)), out),
     h("div", { class: "card" }, h("h2", {}, "Scale sweep", h("small", {}, "patch → eval → revert, on a working copy")), h("div", { class: "row", style: "margin-bottom:12px" }, h("span", { class: "muted" }, "tensors"), pat, h("span", { class: "muted" }, "× multipliers"), vals,
       h("label", { class: "row", style: "gap:6px" }, pl, "per layer"), run, prog), h("div", { class: "row", style: "margin-bottom:8px" }, h("span", { class: "muted" }, "metric"), msel), chart, cap, h("div", { style: "height:10px" }), table));
+};
+
+/* ───────────── Data recovery (SELECT) ───────────── */
+VIEWS.recover = async root => {
+  const models = await api("/api/models"), corpora = await api("/api/corpora");
+  const opt = (list, pick) => list.map((m, i) => h("option", { value: m.path, selected: i === pick }, m.path));
+  const ftGuess = Math.max(0, models.findIndex(m => /\.ft\.gguf$|fine|ft/i.test(m.path)));
+  const baseSel = h("select", {}, opt(models, ftGuess === 0 ? 1 : 0)), ftSel = h("select", {}, opt(models, ftGuess)), cSel = h("select", {}, opt(corpora, 0));
+  const k = h("input", { type: "number", value: 20, min: 1, style: "width:80px" }), meth = h("select", {}, ["select", "topk", "loss_drop", "random"].map(m => h("option", {}, m)));
+  const lab = h("select", {}, h("option", { value: "pseudo" }, "pseudo-labels (θf)"), h("option", { value: "text" }, "text next-token"));
+  const status = h("div", { class: "muted" }, corpora.length ? "Pick a base model, its fine-tune, and a seed corpus." : "Put a .txt / .jsonl seed corpus in the server root to begin.");
+  const hist = canvas(0, 150), list = h("div"), summary = h("div", { class: "grid g4" });
+  const stat = (k, v, sub) => h("div", { class: "card stat" }, h("span", { class: "k" }, k), h("span", { class: "v" }, v), h("span", { class: "s" }, sub || ""));
+  const run = h("button", { class: "btn primary", disabled: !corpora.length || models.length < 2, onclick: async e => {
+    e.target.disabled = true; status.textContent = "computing per-example gradients…";
+    try { const { id } = await api("/api/recover", { base: baseSel.value, finetuned: ftSel.value, corpus: cSel.value, k: +k.value, method: meth.value, labels: lab.value });
+      let j; for (;;) { j = await api("/api/job?id=" + id); if (j.status !== "running") break; await new Promise(r => setTimeout(r, 700)); }
+      if (j.status === "error") throw new Error(j.error); const r = j.result;
+      status.textContent = `${r.method}: selected ${r.k} of ${r.n_seed} seed texts`;
+      summary.replaceChildren(stat("Selected", r.k, "of " + r.n_seed + " seed texts"), stat("Batch cos(ΣG, Δ)", fnum(r.info.final_batch_cos, 3), "higher = better fit"),
+        stat("Changed tensors", r.info.changed_tensors, r.info.head_changed ? "head changed ✔" : "head unchanged ✘"), stat("Projection", r.info.proj_dim ? r.info.proj_dim.toLocaleString() + "-d" : "—", (r.info.n_checkpoints || "—") + " synthetic checkpoints"));
+      const sc = r.all_scores.filter(Number.isFinite); if (sc.length) { const lo = Math.min(...sc), hi = Math.max(...sc), B = 40, hh = new Array(B).fill(0); sc.forEach(v => hh[Math.min(B - 1, Math.floor((v - lo) / ((hi - lo) || 1) * B))]++); drawHist(hist, hh, [lo, hi], "cos(g, Δ)"); }
+      list.replaceChildren(h("div", { class: "scroll", style: "max-height:460px" }, h("table", {}, h("thead", {}, h("tr", {}, ["#", "score", "batch cos", "text"].map(x => h("th", {}, x)))),
+        h("tbody", {}, r.selected.map(x => h("tr", {}, h("td", { class: "mono" }, x.rank + 1), h("td", { class: "mono" }, fnum(x.score)), h("td", { class: "mono" }, fnum(x.batch_cos, 3)), h("td", { class: "mono", style: "max-width:720px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, x.text)))))));
+    } catch (er) { status.textContent = ""; toast(er.message, true); } e.target.disabled = false; } }, "Recover");
+  root.append(h("div", { class: "card" }, h("h2", {}, "Approximate training data", h("small", {}, "SELECT · arXiv 2506.15553")),
+      h("div", { class: "muted", style: "margin:-4px 0 14px;max-width:900px" }, "Ranks a seed corpus you provide by how well each text's output-layer gradient explains the weight change from the base model to its fine-tune, then greedily picks a batch whose summed gradient points along it. The result is a proxy drawn from your corpus, not the original data."),
+      h("div", { class: "row", style: "margin-bottom:10px" }, h("span", { class: "muted" }, "base θ0"), baseSel, h("span", { class: "muted" }, "fine-tuned θf"), ftSel),
+      h("div", { class: "row", style: "margin-bottom:12px" }, h("span", { class: "muted" }, "seed corpus"), cSel, h("span", { class: "muted" }, "k"), k, meth, lab, run), status),
+    summary, h("div", { class: "grid g-side" }, h("div", { class: "card" }, h("h2", {}, "Score distribution", h("small", {}, "cos(g, Δ) over all seeds")), hist),
+      h("div", { class: "card" }, h("h2", {}, "Selected examples", h("small", {}, "in selection order")), list)));
 };
 
 /* ───────────── shell ───────────── */

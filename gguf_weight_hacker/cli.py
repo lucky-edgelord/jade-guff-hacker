@@ -134,14 +134,31 @@ def cmd_harness(a):
     h.close()
 
 
+def cmd_recover(a):
+    from .datarecover import recover, load_corpus, vocab_containment
+    r = recover(a.base, a.model, a.seed_corpus, a.k, method=a.method, n_checkpoints=a.checkpoints,
+                proj_dim=a.proj_dim, max_tokens=a.max_tokens, labels=a.labels)
+    if a.out: r.save(a.out)
+    d = r.to_dict(with_texts=False)
+    if a.reference:
+        d["vocab_containment"] = vocab_containment([r.texts[i] for i in r.indices], load_corpus(a.reference))
+    _out(d) if a.json else print("\n".join(f"{x['rank']:>4}  {x['score']:+.4f}  {x['text'][:100]}" for x in r.selected()))
+
+
 def cmd_serve(a):
     from .web.server import serve
     serve(a.root, host=a.host, port=a.port, token=a.token, readonly=a.readonly)
 
 
 def cmd_make_test_model(a):
-    from .testmodel import build_tiny_model
-    print(build_tiny_model(a.out, n_layers=a.layers))
+    from .testmodel import build_tiny_model, finetune_head, topic_corpus
+    print(build_tiny_model(a.out, n_layers=a.layers, untied_head=a.finetune_demo))
+    if a.finetune_demo:
+        stem = a.out[:-5] if a.out.endswith(".gguf") else a.out
+        print(finetune_head(a.out, stem + ".ft.gguf", topic_corpus(40, "A", seed=100)))
+        with open(stem + ".seed.txt", "w") as fh:
+            fh.write("\n".join(topic_corpus(60, "A", seed=1) + topic_corpus(60, "B", seed=2)) + "\n")
+        print(stem + ".seed.txt  (first 60 lines = topic A, the fine-tune topic)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -178,11 +195,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("kind", choices=["bytemap", "hist", "heatmap", "layers", "report"]); s.add_argument("--tensor")
     s.add_argument("--field", default="d"); s.add_argument("--out", required=True)
     s = sub.add_parser("harness", help="run an experiment spec (JSON/YAML)"); s.set_defaults(fn=cmd_harness); s.add_argument("spec")
+    s = add("recover-data", cmd_recover, "approximate fine-tuning data from a base/fine-tuned pair (SELECT)")
+    s.add_argument("--base", required=True, help="base model; --model is the fine-tuned one")
+    s.add_argument("--seed-corpus", required=True, help=".txt / .jsonl / .json of candidate texts")
+    s.add_argument("--k", type=int, default=100); s.add_argument("--method", default="select", choices=["select", "topk", "loss_drop", "random"])
+    s.add_argument("--checkpoints", type=int, default=3); s.add_argument("--proj-dim", type=int, default=4096)
+    s.add_argument("--max-tokens", type=int, default=64); s.add_argument("--labels", default="pseudo", choices=["pseudo", "text"])
+    s.add_argument("--out", help="write selected examples as .jsonl"); s.add_argument("--reference", help="true data, for vocab containment")
+    s.add_argument("--json", action="store_true")
     s = sub.add_parser("serve", help="start the web dashboard"); s.set_defaults(fn=cmd_serve)
     s.add_argument("--root", default="."); s.add_argument("--host", default="127.0.0.1"); s.add_argument("--port", type=int, default=8765)
     s.add_argument("--token"); s.add_argument("--readonly", action="store_true")
     s = sub.add_parser("make-test-model", help="write a tiny synthetic GGUF"); s.set_defaults(fn=cmd_make_test_model)
     s.add_argument("out"); s.add_argument("--layers", type=int, default=4)
+    s.add_argument("--finetune-demo", action="store_true",
+                   help="also write <out>.ft.gguf (head fine-tuned on topic A) and <out>.seed.txt for recover-data")
     return p
 
 

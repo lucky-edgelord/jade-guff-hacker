@@ -99,6 +99,23 @@ class App:
             raise HttpError(404, f"no such model: {rel}")
         return p
 
+    def resolve_corpus(self, rel: str) -> str:
+        p = os.path.realpath(os.path.join(self.root, rel))
+        if os.path.commonpath([p, self.root]) != self.root or not p.endswith((".txt", ".jsonl", ".json")):
+            raise HttpError(403, "corpus must be a .txt/.jsonl/.json inside the server root")
+        if not os.path.isfile(p):
+            raise HttpError(404, f"no such corpus: {rel}")
+        return p
+
+    def list_corpora(self):
+        out = []
+        for dp, dn, fn in os.walk(self.root):
+            dn[:] = [d for d in dn if not d.startswith(".") and d != "runs"]
+            for f in fn:
+                if f.endswith((".txt", ".jsonl", ".json")) and not f.endswith(".bak"):
+                    full = os.path.join(dp, f); out.append({"path": os.path.relpath(full, self.root), "size": os.path.getsize(full)})
+        return sorted(out, key=lambda x: x["path"])
+
     def session(self, rel: str) -> Session:
         p = self.resolve(rel)
         with self._lock:
@@ -124,6 +141,8 @@ class App:
             return {"root": self.root, "readonly": self.readonly, "version": __import__("gguf_weight_hacker").__version__}
         if route == "/api/models":
             return self.list_models()
+        if route == "/api/corpora":
+            return self.list_corpora()
         if route == "/api/job":
             j = self.jobs.get(a("id"))
             if not j: raise HttpError(404, "no such job")
@@ -205,6 +224,8 @@ class App:
 
     # ---- POST handlers -----------------------------------------------------------
     def post(self, route: str, body: dict):
+        if route == "/api/recover":            # read-only analysis: allowed in --readonly mode
+            return self._start_recover(body)
         if self.readonly:
             raise HttpError(403, "server is read-only")
         s = self.session(body.get("model", ""))
@@ -241,6 +262,33 @@ class App:
         if route == "/api/sweep":
             return self._start_sweep(s, body)
         raise HttpError(404, f"no route {route}")
+
+    def _start_recover(self, b: dict):
+        from ..datarecover import recover
+        base, ft = self.resolve(b.get("base", "")), self.resolve(b.get("finetuned", ""))
+        corpus = self.resolve_corpus(b.get("corpus", ""))
+        if base == ft: raise HttpError(400, "pick two different models")
+        k = max(1, min(int(b.get("k", 50)), 5000)); method = b.get("method", "select")
+        if method not in ("select", "topk", "loss_drop", "random"): raise HttpError(400, "bad method")
+        jid = uuid.uuid4().hex[:8]
+        job = {"id": jid, "kind": "recover", "status": "running", "result": None, "error": None, "started": time.time()}
+        self.jobs[jid] = job
+        for p in (base, ft):                   # flush any pending in-dashboard edits first
+            sess = self.sessions.get(p)
+            if sess:
+                with sess.lock: sess.reader.mmap.flush()
+
+        def run():
+            try:
+                r = recover(base, ft, corpus, k, method=method, n_checkpoints=int(b.get("checkpoints", 3)),
+                            labels=b.get("labels", "pseudo"), max_tokens=int(b.get("max_tokens", 64)))
+                d = r.to_dict(); d["all_scores"] = r.all_scores
+                for row in d["selected"]: row["text"] = row["text"][:400]
+                job["result"], job["status"] = d, "done"
+            except Exception as e:  # noqa: BLE001
+                job["status"], job["error"] = "error", str(e)
+        threading.Thread(target=run, daemon=True).start()
+        return {"id": jid}
 
     def _start_sweep(self, s: Session, b: dict):
         jid = uuid.uuid4().hex[:8]
